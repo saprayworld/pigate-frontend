@@ -151,6 +151,7 @@ func main() {
 	var systemServiceMgr kernel.SystemServiceManager
 	var capProber kernel.CapabilityProber
 	var trafficAcct kernel.TrafficAccountingManager
+	var pathProbe kernel.PathProbeManager
 	dns := kernel.NewDNSManager(cfg.Mock)
 
 	if cfg.Mock || cfg.MockFromReal {
@@ -190,6 +191,7 @@ func main() {
 		trafficLog = mTrafficLog
 		systemServiceMgr = kernel.NewMockSystemServiceManager()
 		capProber = kernel.NewMockCapabilityProber()
+		pathProbe = kernel.NewMockPathProbe()
 		// ruleIDs supplies live DB policy-rule ids so MockTrafficAccounting's
 		// synthetic Top Rules entries actually match something in the DB
 		// (docs/ref/todo/dashboard-traffic-detail-plan.md T-05).
@@ -230,6 +232,7 @@ func main() {
 		systemServiceMgr = kernel.NewRealSystemServiceManager()
 		capProber = kernel.NewRealCapabilityProber()
 		trafficAcct = kernel.NewRealTrafficAccounting()
+		pathProbe = kernel.NewRealPathProbe()
 	}
 
 	// 5. Instantiate Server & Router
@@ -519,6 +522,19 @@ func main() {
 	// than part of the startup-apply sequence.
 	dhcpHealthChecker := service.NewDhcpHealthChecker(repo, ifaceService, dhcpcdService, net, eventLogService, eventBus)
 
+	// Multi-WAN Failover health monitor (docs/ref/todo/
+	// multi-wan-failover-plan.md Task 7/8) — Phase 1 only: this is a
+	// read-only observer (probes configured WAN uplinks, tracks up/degraded/
+	// down state + latency/jitter/loss in RAM) with no ability to change
+	// routing at all yet. Constructed here (needs eventLogService + eventBus,
+	// both now available) but started further down, after both the netlink
+	// monitor and the DHCP health-checker, since it is a third independent
+	// background self-heal/observation loop, not part of the startup-apply
+	// sequence. wanMetricsRing is RAM-only (D-3) and also handed to the API
+	// server via SetWanMonitor below.
+	wanMetricsRing := service.NewWanUplinkMetricsRing()
+	wanMonitor := service.NewWanMonitor(repo, pathProbe, eventLogService, eventBus, wanMetricsRing)
+
 	// Netlink monitor is created here (but started later, after startup config is
 	// applied) so it can be injected into the BackupService, which pauses it (and
 	// hence the whole bus) around a config import.
@@ -566,6 +582,10 @@ func main() {
 	// SetPolicyCounterStore wires the toggle-monitor/monitor-reset endpoints
 	// (docs/ref/todo/fqdn-retry-and-monitored-counters-plan.md T-11).
 	server.SetPolicyCounterStore(policyCounterStore)
+	// SetWanMonitor wires the Multi-WAN Failover status/metrics endpoints
+	// (docs/ref/todo/multi-wan-failover-plan.md Task 8/9) — additive, same
+	// pattern as SetPolicyStatsService/SetPolicyCounterStore above.
+	server.SetWanMonitor(wanMonitor)
 
 	// Apply config form database to kernel
 
@@ -812,6 +832,15 @@ func main() {
 	// part of the startup-apply sequence above.
 	log.Printf("[Main] Starting DHCP health-checker (link-local/no-IP self-heal)...")
 	dhcpHealthChecker.Start(monitorCtx)
+
+	// Start the Multi-WAN Failover health monitor after both the netlink
+	// monitor and the DHCP health-checker (docs/ref/todo/
+	// multi-wan-failover-plan.md Task 8) — read-only in Phase 1: it never
+	// touches routing, it only probes configured WAN uplinks and records
+	// their health/metrics for the UI/API. Safe to start even with zero
+	// uplinks configured (its tick() simply has nothing to do).
+	log.Printf("[Main] Starting Multi-WAN Failover health monitor...")
+	wanMonitor.Start(monitorCtx)
 
 	// FQDN re-resolve retry ticker (docs/ref/todo/
 	// fqdn-retry-and-monitored-counters-plan.md D-1, issue #141) — started
