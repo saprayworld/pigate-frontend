@@ -563,6 +563,48 @@ func migrate(db *sql.DB) error {
 			max_restarts_before_pause INTEGER NOT NULL DEFAULT 3
 		);`,
 
+		// wan_uplinks / wan_failover_settings: configured WAN paths + the
+		// global failover kill switch (docs/ref/todo/multi-wan-failover-plan.md
+		// Task 2). probe_targets is a comma-separated list of IPv4 literals
+		// (mirrors dns_server_settings.upstream_servers's storage convention,
+		// see db/repository.go GetDNSServerSettings) — validated as IPv4-only,
+		// non-hostname entries by model.ValidateWanUplink before being
+		// persisted, so no injection concern from the comma-join/split. Phase 1
+		// (this migration) is entirely read-only with respect to
+		// routing/nftables (D-1) — these tables only ever feed the read-only
+		// health monitor; nothing here is consulted by any kernel-mutating
+		// code path yet. wan_failover_settings.enabled defaults to 0 (kill
+		// switch OFF) so installing this feature changes nothing on an
+		// existing deployment until an operator opts in (plan Caution 9).
+		// There is intentionally no failover_on_degraded column (D-7).
+		`CREATE TABLE IF NOT EXISTS wan_uplinks (
+			id TEXT PRIMARY KEY,
+			name TEXT NOT NULL,
+			interface TEXT UNIQUE NOT NULL,
+			priority INTEGER NOT NULL DEFAULT 1,
+			probe_targets TEXT NOT NULL DEFAULT '',
+			probe_method TEXT NOT NULL DEFAULT 'auto' CHECK(probe_method IN ('icmp', 'tcp', 'auto')),
+			probe_tcp_port INTEGER NOT NULL DEFAULT 0,
+			probe_interval_seconds INTEGER NOT NULL DEFAULT 5,
+			probe_count INTEGER NOT NULL DEFAULT 3,
+			probe_timeout_ms INTEGER NOT NULL DEFAULT 1000,
+			loss_threshold_pct REAL NOT NULL DEFAULT 50,
+			latency_threshold_ms REAL NOT NULL DEFAULT 200,
+			fail_strikes INTEGER NOT NULL DEFAULT 3,
+			recover_strikes INTEGER NOT NULL DEFAULT 3,
+			status INTEGER NOT NULL DEFAULT 1 CHECK(status IN (0,1)),
+			description TEXT NOT NULL DEFAULT ''
+		);`,
+
+		`CREATE TABLE IF NOT EXISTS wan_failover_settings (
+			id INTEGER PRIMARY KEY CHECK(id = 1),
+			enabled INTEGER NOT NULL DEFAULT 0 CHECK(enabled IN (0,1)),
+			mode TEXT NOT NULL DEFAULT 'auto' CHECK(mode IN ('auto', 'manual')),
+			manual_uplink_id TEXT NOT NULL DEFAULT '',
+			min_hold_seconds INTEGER NOT NULL DEFAULT 60,
+			revert_delay_seconds INTEGER NOT NULL DEFAULT 120
+		);`,
+
 		`CREATE TABLE IF NOT EXISTS network_interfaces (
 			id TEXT PRIMARY KEY,
 			name TEXT UNIQUE NOT NULL,
@@ -1237,6 +1279,22 @@ func seed(db *sql.DB, dsn string, mockMode bool) error {
 	if dhcpHealthCount == 0 {
 		_, err := db.Exec(`INSERT INTO dhcp_health_settings (id, enabled, check_interval_seconds, consecutive_strikes, min_running_seconds, restart_backoff_seconds, max_restarts_before_pause) VALUES
 			(1, 1, 60, 3, 30, 300, 3)`)
+		if err != nil {
+			return err
+		}
+	}
+
+	// 5.3 Seed Default WAN Failover Settings (docs/ref/todo/
+	// multi-wan-failover-plan.md Task 2) — enabled=0 (kill switch OFF) so a
+	// fresh install/upgrade never changes routing behavior until an operator
+	// opts in (plan Caution 9).
+	var wanFailoverCount int
+	if err := db.QueryRow("SELECT COUNT(*) FROM wan_failover_settings").Scan(&wanFailoverCount); err != nil {
+		return err
+	}
+	if wanFailoverCount == 0 {
+		_, err := db.Exec(`INSERT OR IGNORE INTO wan_failover_settings (id, enabled, mode, manual_uplink_id, min_hold_seconds, revert_delay_seconds) VALUES
+			(1, 0, 'auto', '', 60, 120)`)
 		if err != nil {
 			return err
 		}
