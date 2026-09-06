@@ -221,6 +221,17 @@ func (s *BackupService) Export(includeUsers bool, passphrase string, includeBloc
 	}
 	cfg.DhcpHealthSettings = dhcpHealth
 
+	// Multi-WAN Failover (docs/ref/todo/multi-wan-failover-plan.md Task 12) —
+	// same pointer/omitempty treatment as DhcpHealthSettings above.
+	if cfg.WanUplinks, err = s.repo.GetWanUplinks(); err != nil {
+		return nil, fmt.Errorf("read wan uplinks: %w", err)
+	}
+	wanFailover, err := s.repo.GetWanFailoverSettings()
+	if err != nil {
+		return nil, fmt.Errorf("read wan failover settings: %w", err)
+	}
+	cfg.WanFailoverSettings = wanFailover
+
 	if includeUsers {
 		if cfg.Users, err = s.repo.GetBackupUsers(); err != nil {
 			return nil, fmt.Errorf("read users: %w", err)
@@ -1132,6 +1143,7 @@ func configCounts(cfg model.BackupConfig) map[string]int {
 		"users":            len(cfg.Users),
 		"wifiPresets":      len(cfg.Presets),
 		"blocklists":       len(cfg.Blocklists),
+		"wanUplinks":       len(cfg.WanUplinks),
 	}
 }
 

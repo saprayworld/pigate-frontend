@@ -97,6 +97,14 @@ func seedCustomConfig(t *testing.T, repo *db.Repository) {
 	if err := repo.CreateWifiPreset(model.WifiPreset{ID: "preset-1", Name: "HomeWifi", SSID: "MyHomeSSID", Security: "WPA2", Password: "supersecret1", MacMode: "randomized"}); err != nil {
 		t.Fatalf("create wifi preset: %v", err)
 	}
+	if _, err := repo.CreateWanUplink(model.WanUplinkInput{
+		Name: "Primary", Interface: "eth0", Priority: 1,
+		ProbeTargets: []string{"1.1.1.1", "8.8.8.8"}, ProbeMethod: model.WanProbeMethodAuto, ProbeTCPPort: 443,
+		ProbeIntervalSeconds: 5, ProbeCount: 3, ProbeTimeoutMs: 1000,
+		LossThresholdPct: 50, LatencyThresholdMs: 200, FailStrikes: 3, RecoverStrikes: 3, Status: true,
+	}); err != nil {
+		t.Fatalf("create wan uplink: %v", err)
+	}
 }
 
 func TestExportIncludesAllSections(t *testing.T) {
@@ -1859,5 +1867,124 @@ func TestImportOldBackupWithoutBlocklistsKeyChecksumRegression(t *testing.T) {
 
 	if _, err := bs.Import(raw, model.ImportOptions{}); err != nil {
 		t.Fatalf("import of a backup without blocklists/blocklistFiles keys must succeed (checksum must still verify), got: %v", err)
+	}
+}
+
+// TestBackupWanUplinksRoundTrip covers docs/ref/todo/
+// multi-wan-failover-plan.md Task 12 acceptance: exporting then importing a
+// backup carries WAN uplinks and the global failover settings through
+// completely (probeTargets, thresholds, strikes, and the manual-mode
+// failover settings all survive the round trip).
+func TestBackupWanUplinksRoundTrip(t *testing.T) {
+	bs, repo := newBackupTestEnv(t)
+	seedCustomConfig(t, repo) // seeds one WAN uplink "Primary"
+
+	if err := repo.UpdateWanFailoverSettings(model.WanFailoverSettings{
+		Enabled: true, Mode: model.WanFailoverModeManual, ManualUplinkID: "wan-manual-target",
+		MinHoldSeconds: 45, RevertDelaySeconds: 90,
+	}); err != nil {
+		t.Fatalf("update wan failover settings: %v", err)
+	}
+
+	file, err := bs.Export(false, "", false)
+	if err != nil {
+		t.Fatalf("export: %v", err)
+	}
+	if len(file.Config.WanUplinks) != 1 {
+		t.Fatalf("expected 1 wan uplink in export, got %d", len(file.Config.WanUplinks))
+	}
+	if file.Config.WanFailoverSettings == nil || !file.Config.WanFailoverSettings.Enabled {
+		t.Fatalf("expected wan failover settings to be exported with enabled=true, got %+v", file.Config.WanFailoverSettings)
+	}
+
+	raw, err := json.Marshal(file)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+
+	res, err := bs.Import(raw, model.ImportOptions{})
+	if err != nil {
+		t.Fatalf("import: %v", err)
+	}
+	if res.Counts["wanUplinks"] != 1 {
+		t.Errorf("imported wanUplinks count = %d, want 1", res.Counts["wanUplinks"])
+	}
+
+	uplinks, err := repo.GetWanUplinks()
+	if err != nil {
+		t.Fatalf("get wan uplinks after import: %v", err)
+	}
+	if len(uplinks) != 1 {
+		t.Fatalf("expected 1 wan uplink after import, got %d", len(uplinks))
+	}
+	u := uplinks[0]
+	if u.Name != "Primary" || u.Interface != "eth0" {
+		t.Errorf("unexpected restored uplink: %+v", u)
+	}
+	if len(u.ProbeTargets) != 2 || u.ProbeTargets[0] != "1.1.1.1" || u.ProbeTargets[1] != "8.8.8.8" {
+		t.Errorf("ProbeTargets not restored correctly: %v", u.ProbeTargets)
+	}
+	if u.ProbeMethod != model.WanProbeMethodAuto || u.ProbeTCPPort != 443 {
+		t.Errorf("probe method/port not restored correctly: %q/%d", u.ProbeMethod, u.ProbeTCPPort)
+	}
+
+	settings, err := repo.GetWanFailoverSettings()
+	if err != nil {
+		t.Fatalf("get wan failover settings after import: %v", err)
+	}
+	if !settings.Enabled || settings.Mode != model.WanFailoverModeManual || settings.ManualUplinkID != "wan-manual-target" {
+		t.Errorf("wan failover settings not restored correctly: %+v", settings)
+	}
+	if settings.MinHoldSeconds != 45 || settings.RevertDelaySeconds != 90 {
+		t.Errorf("wan failover dampening settings not restored correctly: %+v", settings)
+	}
+}
+
+// TestImportOldBackupWithoutWanKeysChecksumRegression mirrors
+// TestImportOldBackupWithoutBlocklistsKeyChecksumRegression: a backup file
+// that predates the Multi-WAN Failover feature entirely lacks the
+// "wanUplinks"/"wanFailoverSettings" keys, and MUST still import
+// successfully — the checksum (computed by re-marshalling the decoded
+// BackupConfig) must be unaffected by these two new omitempty fields.
+func TestImportOldBackupWithoutWanKeysChecksumRegression(t *testing.T) {
+	bs, repo := newBackupTestEnv(t)
+	seedCustomConfig(t, repo)
+
+	file, err := bs.Export(false, "", false)
+	if err != nil {
+		t.Fatalf("export: %v", err)
+	}
+	// Simulate an exporter that predates this feature entirely: drop both
+	// keys before marshalling, then recompute the checksum the way an old
+	// binary would have (over a BackupConfig that never had these fields).
+	file.Config.WanUplinks = nil
+	file.Config.WanFailoverSettings = nil
+	sum, err := configChecksum(*file.Config)
+	if err != nil {
+		t.Fatalf("recompute checksum: %v", err)
+	}
+	file.Meta.Checksum = sum
+
+	raw, err := json.Marshal(file)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if strings.Contains(string(raw), `"wanUplinks"`) || strings.Contains(string(raw), `"wanFailoverSettings"`) {
+		t.Fatalf("test setup invalid: raw backup still contains a wanUplinks/wanFailoverSettings key: %s", raw)
+	}
+
+	if _, err := bs.Import(raw, model.ImportOptions{}); err != nil {
+		t.Fatalf("import of a backup without wanUplinks/wanFailoverSettings keys must succeed (checksum must still verify), got: %v", err)
+	}
+
+	// A pre-existing wan_failover_settings row (seeded at DB init, enabled=0)
+	// must be left untouched by an import that carries no wanFailoverSettings
+	// at all — never wiped/zeroed just because the key was absent.
+	settings, err := repo.GetWanFailoverSettings()
+	if err != nil {
+		t.Fatalf("get wan failover settings after import: %v", err)
+	}
+	if settings.Enabled {
+		t.Errorf("expected wan_failover_settings to be left at its default (enabled=false) when the backup carried no wanFailoverSettings key, got enabled=true")
 	}
 }

@@ -118,6 +118,11 @@ func (r *Repository) RestoreConfig(cfg model.BackupConfig, includeUsers bool) er
 		"DELETE FROM service_objects WHERE type = 'custom'",
 		"DELETE FROM static_routes WHERE type NOT IN ('system', 'defaultgateway')",
 		"DELETE FROM qos_rules",
+		// wan_uplinks (docs/ref/todo/multi-wan-failover-plan.md Task 12) — a
+		// full list, same wipe-and-reinsert treatment as qos_rules just above.
+		// wan_failover_settings is a single-row table restored via UPDATE
+		// further down (same pattern as dhcp_health_settings), never wiped.
+		"DELETE FROM wan_uplinks",
 		"DELETE FROM dhcp_reservations",
 		"DELETE FROM dhcp_configs",
 		"DELETE FROM dns_records",
@@ -295,6 +300,25 @@ func (r *Repository) RestoreConfig(cfg model.BackupConfig, includeUsers bool) er
 		}
 	}
 
+	// --- 6b. Multi-WAN Failover uplinks (docs/ref/todo/
+	// multi-wan-failover-plan.md Task 12) — probe_targets round-trips through
+	// its comma-separated storage column, same convention as CreateWanUplink/
+	// UpdateWanUplink in wan_repo.go.
+	for _, u := range cfg.WanUplinks {
+		if _, err := tx.Exec(
+			`INSERT INTO wan_uplinks (
+				id, name, interface, priority, probe_targets, probe_method, probe_tcp_port,
+				probe_interval_seconds, probe_count, probe_timeout_ms, loss_threshold_pct, latency_threshold_ms,
+				fail_strikes, recover_strikes, status, description
+			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			u.ID, u.Name, u.Interface, u.Priority, strings.Join(u.ProbeTargets, ","), u.ProbeMethod, u.ProbeTCPPort,
+			u.ProbeIntervalSeconds, u.ProbeCount, u.ProbeTimeoutMs, u.LossThresholdPct, u.LatencyThresholdMs,
+			u.FailStrikes, u.RecoverStrikes, boolToInt(u.Status), u.Description,
+		); err != nil {
+			return fmt.Errorf("restore wan uplink %q: %w", u.Name, err)
+		}
+	}
+
 	// --- 7. DHCP configs + reservations ----------------------------------
 	for _, d := range cfg.DhcpConfigs {
 		id := d.ID
@@ -449,6 +473,18 @@ func (r *Repository) RestoreConfig(cfg model.BackupConfig, includeUsers bool) er
 			cfg.DhcpHealthSettings.RestartBackoffSeconds, cfg.DhcpHealthSettings.MaxRestartsBeforePause,
 		); err != nil {
 			return fmt.Errorf("restore dhcp health settings: %w", err)
+		}
+	}
+	// Multi-WAN Failover settings (docs/ref/todo/multi-wan-failover-plan.md
+	// Task 12) — same nil-check pattern as DhcpHealthSettings just above:
+	// omitted in any backup taken before this feature existed.
+	if cfg.WanFailoverSettings != nil {
+		if _, err := tx.Exec(
+			`UPDATE wan_failover_settings SET enabled = ?, mode = ?, manual_uplink_id = ?, min_hold_seconds = ?, revert_delay_seconds = ? WHERE id = 1`,
+			boolToInt(cfg.WanFailoverSettings.Enabled), cfg.WanFailoverSettings.Mode,
+			cfg.WanFailoverSettings.ManualUplinkID, cfg.WanFailoverSettings.MinHoldSeconds, cfg.WanFailoverSettings.RevertDelaySeconds,
+		); err != nil {
+			return fmt.Errorf("restore wan failover settings: %w", err)
 		}
 	}
 

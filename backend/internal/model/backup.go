@@ -102,6 +102,15 @@ type BackupConfig struct {
 	// be regenerated from the .hosts content on import (plan §2.1.1/§2.4).
 	Blocklists     []DNSBlocklist            `json:"blocklists,omitempty"`
 	BlocklistFiles []DNSBlocklistFilePayload `json:"blocklistFiles,omitempty"`
+	// WanUplinks/WanFailoverSettings (docs/ref/todo/multi-wan-failover-plan.md
+	// Task 12) MUST stay omitempty (WanFailoverSettings is a pointer, same
+	// reasoning as DhcpHealthSettings above) for the same checksum-
+	// compatibility reason as PortForwards: an older backup that predates
+	// this feature lacks these keys entirely, and re-marshalling it through
+	// BackupConfig must reproduce byte-for-byte the same JSON it started
+	// with, or its checksum breaks and the whole file fails to import.
+	WanUplinks          []WanUplink          `json:"wanUplinks,omitempty"`
+	WanFailoverSettings *WanFailoverSettings `json:"wanFailoverSettings,omitempty"`
 }
 
 // DNSBlocklistFilePayload carries one blocklist's canonical <id>.hosts file
