@@ -24,6 +24,7 @@ import DNS from "@/pages/DNS"
 import DnsServer from "@/pages/DnsServer"
 import ForceChangePassword from "@/pages/ForceChangePassword"
 import QoS from "@/pages/QoS"
+import WanFailover from "@/pages/WanFailover"
 import EventLogs from "@/pages/EventLogs"
 import ForwardTraffic from "@/pages/ForwardTraffic"
 import LocalTraffic from "@/pages/LocalTraffic"
@@ -174,6 +175,7 @@ export default function App() {
                     <Route path="routes" element={<StaticRoutes />} />
                     <Route path="dhcp" element={<DhcpServer />} />
                     <Route path="qos" element={<QoS />} />
+                    <Route path="wan" element={<WanFailover />} />
                   </Route>
 
                   {/* Policy & Objects Routes */}

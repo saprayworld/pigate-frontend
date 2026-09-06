@@ -29,6 +29,7 @@ import {
   Shield,
   FileText,
   Cog,
+  Shuffle,
 } from "lucide-react"
 
 import { NavUser } from "@/components/nav-user"
@@ -134,6 +135,7 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
         { path: "/network/routes", label: "Static Routes", icon: RouteIcon },
         { path: "/network/dhcp", label: "DHCP Server", icon: Radio },
         { path: "/network/qos", label: "QoS Limiting", icon: Activity },
+        { path: "/network/wan", label: "Multi-WAN", icon: Shuffle },
       ],
     },
     {

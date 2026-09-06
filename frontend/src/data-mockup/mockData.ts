@@ -927,6 +927,172 @@ export const initialDNSBlocklists: DNSBlocklist[] = [
   },
 ]
 
+// --- Multi-WAN Failover (docs/ref/todo/multi-wan-failover-plan.md) -------
+// Phase 1 only: uplink health-check config + read-only live status/metrics.
+// probeMethod/state/effectiveMethod/metricQuality are plain strings (not
+// literal unions) to mirror the backend's JSON contract exactly and avoid
+// the mock/service layer needing its own separate narrowing.
+
+export interface WanUplink {
+  id: string
+  name: string
+  interface: string
+  priority: number
+  probeTargets: string[]
+  probeMethod: string // "icmp" | "tcp" | "auto"
+  probeTcpPort: number
+  probeIntervalSeconds: number
+  probeCount: number
+  probeTimeoutMs: number
+  lossThresholdPct: number
+  latencyThresholdMs: number
+  failStrikes: number
+  recoverStrikes: number
+  status: boolean
+  description: string
+}
+
+export interface WanUplinkState {
+  uplinkId: string
+  interface: string
+  state: string // "unknown" | "up" | "degraded" | "down"
+  active: boolean
+  lastLatencyMs: number
+  // jitterMs is only meaningful when metricQuality === "full" — a
+  // connect-only (TCP) round reports 0, callers must check metricQuality
+  // before displaying it (D-6).
+  jitterMs: number
+  lossPct: number
+  effectiveMethod: string // "icmp" | "tcp"
+  metricQuality: string // "full" | "connect-only"
+  strikes: number
+  lastChangeAt: string
+  reason: string
+}
+
+// WanStatusEntry mirrors the backend's flattened WanUplinkState + name +
+// priority (Go struct embedding), so a single object carries everything a
+// status card needs.
+export interface WanStatusEntry extends WanUplinkState {
+  name: string
+  priority: number
+}
+
+export interface WanStatusResponse {
+  uplinks: WanStatusEntry[]
+  // Phase 2 (not-yet-built failover controller) fields — always the zero
+  // value in Phase 1.
+  bypassedByStaticRoute: boolean
+  activeUplinkId: string
+  lastSwitchAt: string
+  lastSwitchReason: string
+}
+
+export interface WanMetricPoint {
+  timestamp: string
+  avgLatencyMs: number
+  maxLatencyMs: number
+  // null when the bucket has no full-quality (ICMP) sample — never treat a
+  // missing value as zero jitter (D-6).
+  jitterMs: number | null
+  lossPct: number
+}
+
+// WanFailoverSettings is reserved for the Phase 2 kill switch/mode
+// (docs/ref/todo/multi-wan-failover-plan.md Task 16-18) — defined now so
+// wanService.ts's shape matches the eventual backend contract, even though
+// no endpoint returns it yet in Phase 1. There is intentionally no field
+// here that would let a "degraded" reading drive a failover decision (D-7).
+export interface WanFailoverSettings {
+  enabled: boolean
+  mode: string // "auto" | "manual"
+  manualUplinkId: string
+  minHoldSeconds: number
+  revertDelaySeconds: number
+}
+
+// Two example uplinks: primary wired connection healthy, backup Wi-Fi/4G
+// uplink degraded (latency over threshold, no loss) — enough for the UI to
+// exercise every visual state (Badge colors, effective-method label,
+// connect-only jitter graying) without a real board.
+export const initialWanUplinks: WanUplink[] = [
+  {
+    id: "wan-primary",
+    name: "Primary Fiber",
+    interface: "eth0",
+    priority: 1,
+    probeTargets: ["1.1.1.1", "8.8.8.8"],
+    probeMethod: "auto",
+    probeTcpPort: 443,
+    probeIntervalSeconds: 5,
+    probeCount: 3,
+    probeTimeoutMs: 1000,
+    lossThresholdPct: 50,
+    latencyThresholdMs: 200,
+    failStrikes: 3,
+    recoverStrikes: 3,
+    status: true,
+    description: "Main fiber uplink",
+  },
+  {
+    id: "wan-backup",
+    name: "Backup 4G",
+    interface: "wlan0",
+    priority: 2,
+    probeTargets: ["1.1.1.1"],
+    probeMethod: "auto",
+    probeTcpPort: 443,
+    probeIntervalSeconds: 5,
+    probeCount: 3,
+    probeTimeoutMs: 1500,
+    lossThresholdPct: 50,
+    latencyThresholdMs: 150,
+    failStrikes: 3,
+    recoverStrikes: 3,
+    status: true,
+    description: "Backup 4G/Wi-Fi uplink",
+  },
+]
+
+export const initialWanUplinkStates: Record<string, WanUplinkState> = {
+  "wan-primary": {
+    uplinkId: "wan-primary",
+    interface: "eth0",
+    state: "up",
+    active: true,
+    lastLatencyMs: 12.4,
+    jitterMs: 2.1,
+    lossPct: 0,
+    effectiveMethod: "icmp",
+    metricQuality: "full",
+    strikes: 0,
+    lastChangeAt: "2026-09-06T09:00:00Z",
+    reason: "healthy",
+  },
+  "wan-backup": {
+    uplinkId: "wan-backup",
+    interface: "wlan0",
+    state: "degraded",
+    active: false,
+    lastLatencyMs: 210.5,
+    jitterMs: 18.7,
+    lossPct: 0,
+    effectiveMethod: "icmp",
+    metricQuality: "full",
+    strikes: 0,
+    lastChangeAt: "2026-09-06T09:05:00Z",
+    reason: "latency 210.5ms exceeds threshold 150.0ms",
+  },
+}
+
+export const initialWanFailoverSettings: WanFailoverSettings = {
+  enabled: false,
+  mode: "auto",
+  manualUplinkId: "",
+  minHoldSeconds: 60,
+  revertDelaySeconds: 120,
+}
+
 
 
 
