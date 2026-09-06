@@ -526,21 +526,32 @@ linux`), `backend/internal/kernel/real_path_probe_test.go` (ใหม่)
 
 ## 6. Checklist สรุป (Definition of Done)
 
-- [ ] Task 0: Spike kit ส่งมอบ + เจ้าของโปรเจกต์รันบนบอร์ดจริง S-1/S-2/S-6 PASS
+- [x] Task 0: Spike kit ส่งมอบ + เจ้าของโปรเจกต์รันบนบอร์ดจริง S-1/S-2/S-6 PASS
       + บันทึก `docs/ref/wan-failover-findings.md`
-- [ ] Task 1: `model/wan_uplink.go` + validation + test
-- [ ] Task 2: DB migration + `wan_repo.go` + migration test
-- [ ] Task 3: `PathProbeManager` interface (ICMP+TCP)
-- [ ] Task 4: `real_path_probe.go` (raw ICMP + TCP-connect, bind-to-device)
-- [ ] Task 5: `MockPathProbe`
-- [ ] Task 6: `wan_metrics_ring.go` (RAM-only ring buffer)
-- [ ] Task 7: `wan_monitor.go` (state machine + sticky fallback)
-- [ ] Task 8: wiring monitor ใน `cmd/pigate/main.go`
-- [ ] Task 9: API handlers + routes (authRoute) + openapi
-- [ ] Task 10: `frontend/src/services/wanService.ts` + mock data
-- [ ] Task 11: `frontend/src/pages/WanFailover.tsx` + route + sidebar
-- [ ] Task 12: backup/restore
-- [ ] Task 13: capability probe `icmp-probe`
+- [x] Task 1: `model/wan_uplink.go` + validation + test
+- [x] Task 2: DB migration + `wan_repo.go` + migration test
+- [x] Task 3: `PathProbeManager` interface (ICMP+TCP)
+- [x] Task 4: `real_path_probe.go` (raw ICMP + TCP-connect, bind-to-device)
+- [x] Task 5: `MockPathProbe`
+- [x] Task 6: `wan_metrics_ring.go` (RAM-only ring buffer)
+- [x] Task 7: `wan_monitor.go` (state machine + sticky fallback)
+- [x] Task 8: wiring monitor ใน `cmd/pigate/main.go`
+- [x] Task 9: API handlers + routes (authRoute) + openapi
+- [x] Task 10: `frontend/src/services/wanService.ts` + mock data
+- [x] Task 11: `frontend/src/pages/WanFailover.tsx` + route + sidebar
+- [x] Task 12: backup/restore
+- [x] Task 13: capability probe `icmp-probe`
+
+> **Phase 1 (Task 0-13) ผ่าน ai-qa แล้ว 2026-09-06** (conditional pass รอบแรก →
+> แก้ 2 major finding เรื่อง test coverage ของ "probe error → unknown" และ
+> "ไม่ log ซ้ำ" → verification round ผ่านสมบูรณ์) commit: `5dc95a8`..`154bdad`
+> บน branch `feat/multi-wan-failover` (pushed) มี 1 medium finding เลื่อนไป
+> พิจารณาตอนเริ่ม Task 15: sequential probing ต่อ tick + ยังไม่ cap ความยาว
+> `ProbeTargets` อาจทำให้รอบ probe ยาวเกิน interval ที่ตั้งไว้เมื่อ uplink ตาย —
+> ไม่กระทบ Phase 1 (read-only) แต่กระทบ dampening timer ของ Phase 2 โดยตรง
+> ต้องพิจารณาก่อนเริ่ม Task 15 **หยุดพัก Phase 2 ตามคำสั่งเจ้าของโปรเจกต์
+> 2026-09-06 — รอการอนุมัติให้เริ่ม Task 14 ต่อ**
+
 - [ ] Task 14: `routing.go` precedence + override API
 - [ ] Task 15: `wan_failover.go` controller (dampening, anti-blackhole)
 - [ ] Task 16: API settings/kill switch/override (superAdminRoute)
