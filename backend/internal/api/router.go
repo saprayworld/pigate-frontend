@@ -279,6 +279,17 @@ func RegisterRoutes(s *Server) http.Handler {
 	authRoute("GET /api/qos/status/{iface}", s.HandleGetQosIfaceStatus)
 	authRoute("DELETE /api/qos/iface/{iface}", s.HandleClearQosIface)
 
+	// 11. Multi-WAN Failover (docs/ref/todo/multi-wan-failover-plan.md Task 9,
+	// Phase 1 only). All authRoute (same sensitivity as Static Routes/QoS
+	// above) — the superAdminRoute-gated kill switch/manual override
+	// endpoints are Phase 2 (Task 16) and are not registered yet.
+	authRoute("GET /api/wan/uplinks", s.HandleGetWanUplinks)
+	authRoute("POST /api/wan/uplinks", s.HandleCreateWanUplink)
+	authRoute("PUT /api/wan/uplinks/{id}", s.HandleUpdateWanUplink)
+	authRoute("DELETE /api/wan/uplinks/{id}", s.HandleDeleteWanUplink)
+	authRoute("GET /api/wan/status", s.HandleGetWanStatus)
+	authRoute("GET /api/wan/metrics", s.HandleGetWanMetrics)
+
 	// Serve embedded static frontend files
 	serveStatic(mux)
 

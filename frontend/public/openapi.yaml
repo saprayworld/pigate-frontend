@@ -4455,6 +4455,187 @@ paths:
         '401':
           $ref: '#/components/responses/Unauthorized'
 
+  # =========================================================================
+  # MULTI-WAN FAILOVER (docs/ref/todo/multi-wan-failover-plan.md)
+  # Phase 1 only: uplink health-check configuration + read-only live
+  # status/metrics. No routing is ever changed by anything in this section —
+  # the kill switch/mode/manual-override endpoints (superAdminRoute) belong
+  # to Phase 2 and are not implemented yet.
+  # =========================================================================
+  /wan/uplinks:
+    get:
+      tags:
+        - WAN
+      summary: List all configured WAN uplinks
+      operationId: getWanUplinks
+      security:
+        - cookieAuth: []
+      responses:
+        '200':
+          description: List of WAN uplinks
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/WanUplink'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+    post:
+      tags:
+        - WAN
+      summary: Create a new WAN uplink
+      operationId: createWanUplink
+      security:
+        - cookieAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/WanUplinkInput'
+      responses:
+        '201':
+          description: WAN uplink created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WanUplink'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /wan/uplinks/{id}:
+    put:
+      tags:
+        - WAN
+      summary: Update a WAN uplink
+      operationId: updateWanUplink
+      security:
+        - cookieAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/WanUplinkInput'
+      responses:
+        '200':
+          description: Updated WAN uplink
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WanUplink'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    delete:
+      tags:
+        - WAN
+      summary: Delete a WAN uplink
+      operationId: deleteWanUplink
+      security:
+        - cookieAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Uplink deleted
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                    example: WAN uplink deleted
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /wan/status:
+    get:
+      tags:
+        - WAN
+      summary: Get live health status of every configured WAN uplink
+      description: >-
+        Always returns one entry per configured uplink, even one that has
+        never been probed yet (state=unknown in that case). Phase 1 always
+        reports bypassedByStaticRoute=false, activeUplinkId="",
+        lastSwitchAt="", lastSwitchReason="" — those four fields are reserved
+        for the not-yet-implemented Phase 2 automatic failover controller.
+      operationId: getWanStatus
+      security:
+        - cookieAuth: []
+      responses:
+        '200':
+          description: Live WAN uplink status
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WanStatusResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /wan/metrics:
+    get:
+      tags:
+        - WAN
+      summary: Get latency/jitter/loss history for one WAN uplink
+      description: >-
+        Backed by a RAM-only 5-minute-bucket ring (never persisted to SQLite,
+        see tech_stack_design.md §8) — history resets on a pigate restart.
+        jitterMs is omitted for buckets built only from TCP connect-only
+        probes (metricQuality="connect-only"), since TCP-connect cannot
+        measure jitter.
+      operationId: getWanMetrics
+      security:
+        - cookieAuth: []
+      parameters:
+        - name: uplink
+          in: query
+          required: true
+          schema:
+            type: string
+          example: wan-3f9c2b1a
+        - name: window
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [15m, 30m, 1h, 3h, 6h, 12h, 24h]
+            default: 1h
+      responses:
+        '200':
+          description: >-
+            Time series, oldest first, always exactly the window's bucket
+            count long (empty buckets read back as zero-valued points).
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/WanMetricPoint'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
 # =========================================================================
 # COMPONENTS & SCHEMAS
 # =========================================================================
@@ -10219,3 +10400,275 @@ components:
         ruleName:
           type: string
           example: Limit Guest WiFi
+
+    WanUplink:
+      type: object
+      description: >-
+        A configured WAN path health-checked via ICMP/TCP probes bound to its
+        interface (SO_BINDTODEVICE). Persisted config, not runtime state — see
+        WanUplinkState for the live health side.
+      properties:
+        id:
+          type: string
+          example: wan-3f9c2b1a
+        name:
+          type: string
+          example: Primary Fiber
+        interface:
+          type: string
+          example: eth0
+        priority:
+          type: integer
+          description: Lower value = higher priority. Not used by anything in Phase 1.
+          example: 1
+        probeTargets:
+          type: array
+          description: >-
+            IPv4 literals ONLY, never hostnames (no DNS dependency during an
+            outage, no DNS-poisoning influence on routing behavior). There is
+            no built-in default target — at least one must be provided.
+          items:
+            type: string
+          example: ["1.1.1.1", "8.8.8.8"]
+        probeMethod:
+          type: string
+          enum: [icmp, tcp, auto]
+          description: >-
+            "auto" tries ICMP first and falls back to TCP-connect within the
+            same round if every target gets zero replies.
+          example: auto
+        probeTcpPort:
+          type: integer
+          description: >-
+            Required (1-65535) when probeMethod is "tcp" or "auto"; must be 0
+            when probeMethod is "icmp".
+          example: 443
+        probeIntervalSeconds:
+          type: integer
+          example: 5
+        probeCount:
+          type: integer
+          description: Packets/connections sent per target per round.
+          example: 3
+        probeTimeoutMs:
+          type: integer
+          example: 1000
+        lossThresholdPct:
+          type: number
+          format: float
+          example: 50
+        latencyThresholdMs:
+          type: number
+          format: float
+          example: 200
+        failStrikes:
+          type: integer
+          description: Consecutive failing rounds required before transitioning to down.
+          example: 3
+        recoverStrikes:
+          type: integer
+          description: Consecutive healthy rounds required to transition back to up.
+          example: 3
+        status:
+          type: boolean
+          description: Whether this uplink is monitored at all.
+          example: true
+        description:
+          type: string
+          example: Main fiber uplink
+
+    WanUplinkInput:
+      type: object
+      required:
+        - name
+        - interface
+        - probeTargets
+        - probeMethod
+        - probeIntervalSeconds
+        - probeCount
+        - probeTimeoutMs
+        - lossThresholdPct
+        - latencyThresholdMs
+        - failStrikes
+        - recoverStrikes
+      properties:
+        name:
+          type: string
+          example: Primary Fiber
+        interface:
+          type: string
+          example: eth0
+        priority:
+          type: integer
+          example: 1
+        probeTargets:
+          type: array
+          items:
+            type: string
+          example: ["1.1.1.1", "8.8.8.8"]
+        probeMethod:
+          type: string
+          enum: [icmp, tcp, auto]
+          example: auto
+        probeTcpPort:
+          type: integer
+          example: 443
+        probeIntervalSeconds:
+          type: integer
+          example: 5
+        probeCount:
+          type: integer
+          example: 3
+        probeTimeoutMs:
+          type: integer
+          example: 1000
+        lossThresholdPct:
+          type: number
+          format: float
+          example: 50
+        latencyThresholdMs:
+          type: number
+          format: float
+          example: 200
+        failStrikes:
+          type: integer
+          example: 3
+        recoverStrikes:
+          type: integer
+          example: 3
+        status:
+          type: boolean
+          example: true
+        description:
+          type: string
+          example: Main fiber uplink
+
+    WanUplinkState:
+      type: object
+      description: RAM-only (never persisted) live health snapshot of one uplink.
+      properties:
+        uplinkId:
+          type: string
+          example: wan-3f9c2b1a
+        interface:
+          type: string
+          example: eth0
+        state:
+          type: string
+          enum: [unknown, up, degraded, down]
+          description: >-
+            "degraded" is display-only (a latency-threshold breach with no
+            loss) and never triggers a failover — only "down" does.
+          example: up
+        active:
+          type: boolean
+          description: Always false in Phase 1 (no failover controller exists yet).
+          example: false
+        lastLatencyMs:
+          type: number
+          format: float
+          example: 12.4
+        jitterMs:
+          type: number
+          format: float
+          description: >-
+            Only meaningful when metricQuality="full" — a connect-only round
+            still reports 0, callers must check metricQuality before
+            displaying it.
+          example: 2.1
+        lossPct:
+          type: number
+          format: float
+          example: 0
+        effectiveMethod:
+          type: string
+          enum: [icmp, tcp]
+          description: >-
+            The method actually used on the most recent round — may differ
+            from the configured probeMethod once probeMethod="auto" has gone
+            sticky-failed on ICMP.
+          example: icmp
+        metricQuality:
+          type: string
+          enum: [full, connect-only]
+          example: full
+        strikes:
+          type: integer
+          description: Current consecutive fail/recover streak driving the next transition.
+          example: 0
+        lastChangeAt:
+          type: string
+          format: date-time
+          description: Empty until the first state change.
+          example: "2026-09-06T10:00:00Z"
+        reason:
+          type: string
+          example: healthy
+
+    WanStatusEntry:
+      description: One WanUplinkState plus its static name/priority.
+      allOf:
+        - $ref: '#/components/schemas/WanUplinkState'
+        - type: object
+          properties:
+            name:
+              type: string
+              example: Primary Fiber
+            priority:
+              type: integer
+              example: 1
+
+    WanStatusResponse:
+      type: object
+      properties:
+        uplinks:
+          type: array
+          items:
+            $ref: '#/components/schemas/WanStatusEntry'
+        bypassedByStaticRoute:
+          type: boolean
+          description: >-
+            Phase 2 field (reserved). Always false in Phase 1 — nothing here
+            can change routing yet.
+          example: false
+        activeUplinkId:
+          type: string
+          description: Phase 2 field (reserved). Always empty in Phase 1.
+          example: ""
+        lastSwitchAt:
+          type: string
+          description: Phase 2 field (reserved). Always empty in Phase 1.
+          example: ""
+        lastSwitchReason:
+          type: string
+          description: Phase 2 field (reserved). Always empty in Phase 1.
+          example: ""
+
+    WanMetricPoint:
+      type: object
+      description: One 5-minute bucket of a WAN uplink's latency/loss history.
+      properties:
+        timestamp:
+          type: string
+          format: date-time
+          example: "2026-09-06T10:00:00Z"
+        avgLatencyMs:
+          type: number
+          format: float
+          example: 12.4
+        maxLatencyMs:
+          type: number
+          format: float
+          example: 25.0
+        jitterMs:
+          type: number
+          format: float
+          nullable: true
+          description: >-
+            null/omitted when the bucket has no full-quality (ICMP) samples —
+            never interpret a missing value as zero jitter.
+          example: 2.1
+        lossPct:
+          type: number
+          format: float
+          example: 0
