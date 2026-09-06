@@ -8,6 +8,7 @@ import (
 	"log"
 	"math"
 	"math/rand"
+	"net"
 	"os"
 	"strings"
 	"sync"
@@ -796,7 +797,8 @@ func (m *MockSystemServiceManager) Restart(unit string) error {
 // reason "mock", so dev machines running -mock=true never see a capability
 // warning banner (docs/ref/todo/kernel-capability-detection-plan.md §0).
 // Its id set MUST stay in sync with RealCapabilityProber's registry
-// (firewall, dbus, dnsmasq, resolved, conntrack, conntrack-events).
+// (firewall, dbus, dnsmasq, resolved, conntrack, conntrack-events,
+// icmp-probe).
 type MockCapabilityProber struct{}
 
 func NewMockCapabilityProber() *MockCapabilityProber {
@@ -804,7 +806,7 @@ func NewMockCapabilityProber() *MockCapabilityProber {
 }
 
 func (m *MockCapabilityProber) ProbeAll() []model.CapabilityProbeResult {
-	ids := []string{"firewall", "dbus", "dnsmasq", "resolved", "conntrack", "conntrack-events"}
+	ids := []string{"firewall", "dbus", "dnsmasq", "resolved", "conntrack", "conntrack-events", "icmp-probe"}
 	out := make([]model.CapabilityProbeResult, 0, len(ids))
 	for _, id := range ids {
 		out = append(out, model.CapabilityProbeResult{
@@ -1325,4 +1327,110 @@ func (m *MockTrafficAccounting) WatchFlowEnd(ctx context.Context, cb func(model.
 			})
 		}
 	}
+}
+
+// MockPathProbe implements kernel.PathProbeManager for local/dev testing
+// (docs/ref/todo/multi-wan-failover-plan.md Task 5). It never opens a real
+// socket (no net.ListenPacket, no net.Dialer) and never sleeps for anything
+// resembling a real probe timeout — every call returns immediately with a
+// synthetic sample, so `-mock=true` never sends a single ICMP/TCP packet off
+// the box.
+//
+// SetICMPDead/SetAllDead let tests deterministically drive the two
+// interesting failure scenarios the D-5 auto-fallback/sticky logic
+// (service.WanMonitor) needs to exercise: "ICMP is dead but TCP still
+// works" (SetICMPDead) and "the whole uplink is down" (SetAllDead). Both are
+// keyed by ifaceName since that is the only per-uplink identifier every
+// PathProbeManager call receives.
+type MockPathProbe struct {
+	mu       sync.Mutex
+	icmpDead map[string]bool
+	allDead  map[string]bool
+	// ICMPCalls/TCPCalls count invocations per interface so tests can assert
+	// e.g. "ProbeMethod=icmp never calls ProbeTCP even under 100% loss"
+	// (plan Task 7 acceptance).
+	ICMPCalls map[string]int
+	TCPCalls  map[string]int
+}
+
+func NewMockPathProbe() *MockPathProbe {
+	return &MockPathProbe{
+		icmpDead:  make(map[string]bool),
+		allDead:   make(map[string]bool),
+		ICMPCalls: make(map[string]int),
+		TCPCalls:  make(map[string]int),
+	}
+}
+
+// SetICMPDead forces ProbeICMP (only) to report 100% loss for ifaceName;
+// ProbeTCP on the same interface is unaffected.
+func (m *MockPathProbe) SetICMPDead(ifaceName string, dead bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.icmpDead[ifaceName] = dead
+}
+
+// SetAllDead forces both ProbeICMP and ProbeTCP to report 100% loss for
+// ifaceName (the "uplink is fully down" scenario).
+func (m *MockPathProbe) SetAllDead(ifaceName string, dead bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.allDead[ifaceName] = dead
+}
+
+// mockPathProbeRTTPattern is a fixed, non-random sequence of plausible RTTs
+// (milliseconds) cycled through to fill a sample's RTTsMs — deterministic
+// (plan Task 5: "deterministic-ish") so dev-mode runs are reproducible,
+// while still varying enough to produce a non-zero jitter figure downstream.
+var mockPathProbeRTTPattern = []float64{15, 22, 18, 27, 12, 20, 25, 14, 19, 23}
+
+func mockPathProbeRTTs(count int) []float64 {
+	if count <= 0 {
+		return nil
+	}
+	out := make([]float64, count)
+	for i := range out {
+		out[i] = mockPathProbeRTTPattern[i%len(mockPathProbeRTTPattern)]
+	}
+	return out
+}
+
+func (m *MockPathProbe) ProbeICMP(ctx context.Context, ifaceName string, target net.IP, count int, timeout time.Duration) (model.WanProbeSample, error) {
+	m.mu.Lock()
+	m.ICMPCalls[ifaceName]++
+	dead := m.icmpDead[ifaceName] || m.allDead[ifaceName]
+	m.mu.Unlock()
+
+	sample := model.WanProbeSample{
+		TimestampUnix: time.Now().Unix(),
+		Sent:          count,
+		Method:        model.WanProbeMethodICMP,
+		MetricQuality: model.WanMetricQualityFull,
+	}
+	if dead || count <= 0 {
+		return sample, nil
+	}
+	sample.Received = count
+	sample.RTTsMs = mockPathProbeRTTs(count)
+	return sample, nil
+}
+
+func (m *MockPathProbe) ProbeTCP(ctx context.Context, ifaceName string, target net.IP, port, count int, timeout time.Duration) (model.WanProbeSample, error) {
+	m.mu.Lock()
+	m.TCPCalls[ifaceName]++
+	dead := m.allDead[ifaceName]
+	m.mu.Unlock()
+
+	sample := model.WanProbeSample{
+		TimestampUnix: time.Now().Unix(),
+		Sent:          count,
+		Method:        model.WanProbeMethodTCP,
+		MetricQuality: model.WanMetricQualityConnectOnly,
+	}
+	if dead || count <= 0 {
+		return sample, nil
+	}
+	sample.Received = count
+	sample.RTTsMs = mockPathProbeRTTs(count)
+	return sample, nil
 }

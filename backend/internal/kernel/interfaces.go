@@ -2,6 +2,7 @@ package kernel
 
 import (
 	"context"
+	"net"
 	"time"
 
 	"pigate/internal/model"
@@ -366,6 +367,48 @@ type SystemServiceManager interface {
 	// already resolved unit from a server-side whitelist — never pass a raw,
 	// client-supplied string straight through (unit-name injection).
 	Restart(unit string) error
+}
+
+// PathProbeManager abstracts sending ICMP/TCP-connect health probes out a
+// specific network interface, for the Multi-WAN Failover health monitor
+// (docs/ref/todo/multi-wan-failover-plan.md, Phase 1 — read-only with
+// respect to routing/nftables, D-1). Both methods:
+//  1. are strictly read-only: they never modify routing, firewall, or any
+//     other system state — this is a measurement probe, nothing else;
+//  2. MUST bind the probe socket to ifaceName via SO_BINDTODEVICE (not just
+//     rely on source-IP selection), since a multi-WAN host has more than one
+//     default route active at once and the kernel's normal route selection
+//     would otherwise not exercise the path being asked about;
+//  3. MUST respect ctx and always return within count*timeout — a caller
+//     (the periodic WAN monitor) must never be blocked indefinitely by a
+//     socket that never gets a reply;
+//  4. treat "the destination never replied" as a normal, non-error result
+//     (the returned model.WanProbeSample simply has Received==0/a shorter
+//     RTTsMs) — an error return is reserved for the probe mechanism itself
+//     failing (e.g. socket() failed, permission denied, interface does not
+//     exist), which is a different condition the health monitor must
+//     distinguish from "target is unreachable";
+//  5. MUST always set Sample.Method and Sample.MetricQuality on every
+//     return (including the zero-value/error paths a caller might still
+//     read fields off of) — ProbeTCP always reports MetricQuality
+//     "connect-only" (TCP-connect cannot measure jitter, D-6), while
+//     ProbeICMP reports "full".
+//
+// Deciding WHEN to fall back from ICMP to TCP (the "auto" ProbeMethod,
+// D-5) is entirely a service-layer (service.WanMonitor) concern — this
+// interface has no notion of "auto" at all, it only ever probes the one
+// method it was asked for.
+type PathProbeManager interface {
+	// ProbeICMP sends count ICMP Echo Requests to target out ifaceName,
+	// waiting up to timeout for each reply, and returns a summary sample.
+	ProbeICMP(ctx context.Context, ifaceName string, target net.IP, count int, timeout time.Duration) (model.WanProbeSample, error)
+	// ProbeTCP attempts count TCP connections to target:port out ifaceName,
+	// waiting up to timeout for each to establish, and returns a summary
+	// sample. A connection actively refused by the remote host counts as the
+	// destination being reachable (the path works, nothing is listening on
+	// that port) — see real_path_probe.go for why that is counted as success
+	// in the reachability sense despite being a "connection error".
+	ProbeTCP(ctx context.Context, ifaceName string, target net.IP, port, count int, timeout time.Duration) (model.WanProbeSample, error)
 }
 
 // CapabilityProber abstracts read-only detection of whether the kernel
