@@ -1342,10 +1342,19 @@ func (m *MockTrafficAccounting) WatchFlowEnd(ctx context.Context, cb func(model.
 // works" (SetICMPDead) and "the whole uplink is down" (SetAllDead). Both are
 // keyed by ifaceName since that is the only per-uplink identifier every
 // PathProbeManager call receives.
+//
+// SetProbeError additionally lets tests exercise the third, distinct
+// scenario: the PathProbeManager call itself fails (socket/permission/
+// interface-not-found), as opposed to the target simply not answering. This
+// is what service.WanMonitor's probeUplink must fold into a "down"-uplink
+// classification NOT reported as "unknown" (see wan_monitor_test.go's
+// TestWanMonitor_ProbeErrorProducesUnknownNotDown, plan Task 7 acceptance:
+// "probe error (ระบบพัง) != down เป็น unknown+log").
 type MockPathProbe struct {
 	mu       sync.Mutex
 	icmpDead map[string]bool
 	allDead  map[string]bool
+	probeErr map[string]error
 	// ICMPCalls/TCPCalls count invocations per interface so tests can assert
 	// e.g. "ProbeMethod=icmp never calls ProbeTCP even under 100% loss"
 	// (plan Task 7 acceptance).
@@ -1357,6 +1366,7 @@ func NewMockPathProbe() *MockPathProbe {
 	return &MockPathProbe{
 		icmpDead:  make(map[string]bool),
 		allDead:   make(map[string]bool),
+		probeErr:  make(map[string]error),
 		ICMPCalls: make(map[string]int),
 		TCPCalls:  make(map[string]int),
 	}
@@ -1376,6 +1386,19 @@ func (m *MockPathProbe) SetAllDead(ifaceName string, dead bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.allDead[ifaceName] = dead
+}
+
+// SetProbeError makes both ProbeICMP and ProbeTCP return err for ifaceName
+// instead of a sample, simulating a probe-system failure rather than the
+// target being unreachable. Pass a nil err to clear the injected failure.
+func (m *MockPathProbe) SetProbeError(ifaceName string, err error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if err == nil {
+		delete(m.probeErr, ifaceName)
+		return
+	}
+	m.probeErr[ifaceName] = err
 }
 
 // mockPathProbeRTTPattern is a fixed, non-random sequence of plausible RTTs
@@ -1399,7 +1422,11 @@ func (m *MockPathProbe) ProbeICMP(ctx context.Context, ifaceName string, target 
 	m.mu.Lock()
 	m.ICMPCalls[ifaceName]++
 	dead := m.icmpDead[ifaceName] || m.allDead[ifaceName]
+	err := m.probeErr[ifaceName]
 	m.mu.Unlock()
+	if err != nil {
+		return model.WanProbeSample{}, err
+	}
 
 	sample := model.WanProbeSample{
 		TimestampUnix: time.Now().Unix(),
@@ -1419,7 +1446,11 @@ func (m *MockPathProbe) ProbeTCP(ctx context.Context, ifaceName string, target n
 	m.mu.Lock()
 	m.TCPCalls[ifaceName]++
 	dead := m.allDead[ifaceName]
+	err := m.probeErr[ifaceName]
 	m.mu.Unlock()
+	if err != nil {
+		return model.WanProbeSample{}, err
+	}
 
 	sample := model.WanProbeSample{
 		TimestampUnix: time.Now().Unix(),

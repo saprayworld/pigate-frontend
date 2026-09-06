@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -282,6 +283,33 @@ func TestWanMonitor_ICMPRecoversAfterRetestInterval(t *testing.T) {
 	}
 }
 
+// countStateEvents filters events down to the "wan-uplink-state" action so
+// tests can assert on exactly how many health-state transitions were logged,
+// ignoring unrelated actions (e.g. "wan-uplink-method-switch") that may share
+// model.EventCategoryNetwork.
+func countStateEvents(events []model.SystemEvent) int {
+	n := 0
+	for _, ev := range events {
+		if ev.Action == "wan-uplink-state" {
+			n++
+		}
+	}
+	return n
+}
+
+// queryStateEvents reads the real event log (through the same EventLogService
+// the monitor logs into, which merges still-queued/unflushed events —
+// EventLogService.Query — so no explicit Flush()/Start() is needed) and
+// returns how many "wan-uplink-state" events exist so far.
+func queryStateEvents(t *testing.T, m *WanMonitor) int {
+	t.Helper()
+	events, _, err := m.eventLog.Query(model.EventCategoryNetwork, "", "", 1000, 0)
+	if err != nil {
+		t.Fatalf("eventLog.Query failed: %v", err)
+	}
+	return countStateEvents(events)
+}
+
 func TestWanMonitor_StateUnchangedDoesNotReLog(t *testing.T) {
 	monitor, repo, _ := newTestWanMonitor(t)
 	u := createTestUplink(t, repo, "eth-stable", model.WanProbeMethodICMP, 0)
@@ -294,13 +322,88 @@ func TestWanMonitor_StateUnchangedDoesNotReLog(t *testing.T) {
 	if st.State != model.WanStateUp {
 		t.Fatalf("expected up throughout, got %q", st.State)
 	}
-	// lastChangeAt is set once (on the unknown->up transition on round 1)
-	// and must not be touched again by the following stable rounds — we
-	// can't observe log-call counts directly here without a fake sink, so
-	// this at least proves the FailStreak/RecoverStreak bookkeeping isn't
-	// silently flapping (which would indicate spurious change detection).
 	if st.Strikes != 0 {
 		t.Errorf("expected FailStreak=0 while consistently healthy, got %d", st.Strikes)
+	}
+
+	// D-7 requires "ห้าม log ทุกรอบ" — verify against the real event log
+	// (backed by the in-memory DB via EventLogService), not just RAM
+	// bookkeeping: exactly one state-change event (unknown->up on round 1)
+	// must exist after 5 consistently-healthy rounds.
+	got := queryStateEvents(t, monitor)
+	if got != 1 {
+		t.Fatalf("expected exactly 1 logged state-change event after 5 unchanged rounds, got %d", got)
+	}
+
+	// Run several more still-healthy rounds and confirm the log count does
+	// NOT grow — this is the actual regression the previous version of this
+	// test failed to catch (it only checked FailStreak==0).
+	for i := 5; i < 10; i++ {
+		monitor.probeUplink(u, now.Add(time.Duration(i)*3*time.Second))
+	}
+	if got := queryStateEvents(t, monitor); got != 1 {
+		t.Errorf("expected still exactly 1 logged state-change event after 5 more unchanged rounds (no re-log), got %d", got)
+	}
+}
+
+// TestWanMonitor_ProbeErrorProducesUnknownNotDown covers the plan Task 7
+// acceptance criterion "probe error (ระบบพัง) != down เป็น unknown+log": when
+// the PathProbeManager call itself fails (as opposed to the target simply
+// not answering), probeUplink must report "unknown" — never "down" — must
+// leave FailStreak/RecoverStreak untouched, and must log the transition only
+// once (not every round the error persists).
+func TestWanMonitor_ProbeErrorProducesUnknownNotDown(t *testing.T) {
+	monitor, repo, probe := newTestWanMonitor(t)
+	u := createTestUplink(t, repo, "eth-probe-err", model.WanProbeMethodICMP, 0)
+
+	now := time.Now()
+	// Round 1: a normal healthy probe brings the uplink from the initial
+	// "unknown" state to "up".
+	monitor.probeUplink(u, now)
+	st := stateFor(t, monitor, u.ID)
+	if st.State != model.WanStateUp {
+		t.Fatalf("expected up after a healthy round, got %q (reason=%q)", st.State, st.Reason)
+	}
+	if got := queryStateEvents(t, monitor); got != 1 {
+		t.Fatalf("expected 1 logged state-change event (unknown->up), got %d", got)
+	}
+
+	// Round 2: the probe subsystem itself fails (socket/permission/interface
+	// error) — must be classified "unknown", NOT "down".
+	probe.SetProbeError(u.Interface, errors.New("mock probe system failure"))
+	monitor.probeUplink(u, now.Add(3*time.Second))
+
+	st = stateFor(t, monitor, u.ID)
+	if st.State != model.WanStateUnknown {
+		t.Fatalf("expected unknown on probe error, got %q (reason=%q)", st.State, st.Reason)
+	}
+	if st.Strikes != 0 {
+		t.Errorf("probe error must not advance FailStreak, got %d", st.Strikes)
+	}
+
+	monitor.mu.Lock()
+	rt := monitor.states[u.ID]
+	failStreak, recoverStreak := rt.failStreak, rt.recoverStreak
+	monitor.mu.Unlock()
+	if failStreak != 0 || recoverStreak != 0 {
+		t.Errorf("probe error must not touch FailStreak/RecoverStreak, got fail=%d recover=%d", failStreak, recoverStreak)
+	}
+
+	if got := queryStateEvents(t, monitor); got != 2 {
+		t.Fatalf("expected 2 logged state-change events after the up->unknown transition, got %d", got)
+	}
+
+	// Rounds 3-5: the probe keeps erroring every round — must stay "unknown"
+	// and must NOT log again (only once per transition into the state).
+	for i := 0; i < 3; i++ {
+		monitor.probeUplink(u, now.Add(time.Duration(i+2)*3*time.Second))
+	}
+	st = stateFor(t, monitor, u.ID)
+	if st.State != model.WanStateUnknown {
+		t.Fatalf("expected to remain unknown while the probe keeps erroring, got %q", st.State)
+	}
+	if got := queryStateEvents(t, monitor); got != 2 {
+		t.Errorf("expected still exactly 2 logged state-change events (no re-log while stuck unknown), got %d", got)
 	}
 }
 
