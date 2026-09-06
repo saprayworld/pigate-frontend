@@ -167,7 +167,7 @@ func TestSystemCapability_ApplyHealthNeverAppliedIsIgnored(t *testing.T) {
 }
 
 func TestSystemCapability_MockModeAllAvailable(t *testing.T) {
-	ids := []string{"firewall", "dbus", "dnsmasq", "resolved", "conntrack", "conntrack-events"}
+	ids := []string{"firewall", "dbus", "dnsmasq", "resolved", "conntrack", "conntrack-events", "icmp-probe"}
 	results := make([]model.CapabilityProbeResult, 0, len(ids))
 	for _, id := range ids {
 		results = append(results, model.CapabilityProbeResult{ID: id, Available: true, Reason: model.CapabilityReasonMock})
@@ -187,4 +187,65 @@ func TestSystemCapability_MockModeAllAvailable(t *testing.T) {
 			t.Errorf("expected %s reason=mock, got %q", c.ID, c.Reason)
 		}
 	}
+}
+
+// TestSystemCapability_ICMPProbeDegradedNotError covers docs/ref/todo/
+// multi-wan-failover-plan.md Task 13 acceptance: a host missing cap_net_raw
+// (icmp-probe comes back Degraded) must surface as Degraded=true with
+// Available still true and a detail message that mentions the TCP fallback
+// — never as a hard "Available=false" failure for the whole panel.
+func TestSystemCapability_ICMPProbeDegradedNotError(t *testing.T) {
+	results := append(fullResults(okResult("firewall")),
+		okResult("conntrack"),
+		okResult("conntrack-events"),
+		model.CapabilityProbeResult{
+			ID: "icmp-probe", Available: true, Degraded: true,
+			Reason: model.CapabilityReasonICMPUnavailable, Err: "listen ip4:icmp 0.0.0.0: socket: operation not permitted",
+		},
+	)
+	prober := &fakeProber{results: results}
+	svc := NewSystemCapabilityService(prober, false, nil)
+
+	caps := svc.Get(true)
+	var icmpStatus *model.CapabilityStatus
+	for i := range caps.Capabilities {
+		if caps.Capabilities[i].ID == "icmp-probe" {
+			icmpStatus = &caps.Capabilities[i]
+		}
+	}
+	if icmpStatus == nil {
+		t.Fatal("expected an icmp-probe entry in the capabilities list")
+	}
+	if !icmpStatus.Available {
+		t.Errorf("expected Available=true even when degraded, got false")
+	}
+	if !icmpStatus.Degraded {
+		t.Errorf("expected Degraded=true when cap_net_raw is missing")
+	}
+	if icmpStatus.Detail == "" {
+		t.Error("expected a non-empty Detail message")
+	}
+}
+
+// TestSystemCapability_ICMPProbeOK covers the healthy path: a host with
+// cap_net_raw reports icmp-probe as fully ok, not degraded.
+func TestSystemCapability_ICMPProbeOK(t *testing.T) {
+	results := append(fullResults(okResult("firewall")),
+		okResult("conntrack"),
+		okResult("conntrack-events"),
+		okResult("icmp-probe"),
+	)
+	prober := &fakeProber{results: results}
+	svc := NewSystemCapabilityService(prober, false, nil)
+
+	caps := svc.Get(true)
+	for _, c := range caps.Capabilities {
+		if c.ID == "icmp-probe" {
+			if !c.Available || c.Degraded {
+				t.Errorf("expected icmp-probe fully ok, got %+v", c)
+			}
+			return
+		}
+	}
+	t.Fatal("expected an icmp-probe entry in the capabilities list")
 }

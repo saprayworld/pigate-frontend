@@ -9,6 +9,7 @@ import (
 	"github.com/godbus/dbus/v5"
 	"github.com/google/nftables"
 	"github.com/vishvananda/netlink/nl"
+	"golang.org/x/net/icmp"
 	"golang.org/x/sys/unix"
 
 	"pigate/internal/model"
@@ -34,7 +35,7 @@ func NewRealCapabilityProber() *RealCapabilityProber {
 // conntrack-events), even when a probe fails or times out. The whole batch is
 // bounded by capabilityProbeTimeout.
 func (p *RealCapabilityProber) ProbeAll() []model.CapabilityProbeResult {
-	ids := []string{"firewall", "dbus", "dnsmasq", "resolved", "conntrack", "conntrack-events"}
+	ids := []string{"firewall", "dbus", "dnsmasq", "resolved", "conntrack", "conntrack-events", "icmp-probe"}
 
 	type resultsMsg struct {
 		results []model.CapabilityProbeResult
@@ -50,6 +51,7 @@ func (p *RealCapabilityProber) ProbeAll() []model.CapabilityProbeResult {
 			probeSystemdUnit("resolved", "systemd-resolved.service", dbusOK),
 			probeConntrack(),
 			probeConntrackEvents(),
+			probeICMPRaw(),
 		}
 		done <- resultsMsg{results: results}
 	}()
@@ -216,6 +218,30 @@ func probeConntrackEvents() model.CapabilityProbeResult {
 	}
 	sock.Close()
 	return model.CapabilityProbeResult{ID: "conntrack-events", Available: true, Reason: model.CapabilityReasonOK}
+}
+
+// probeICMPRaw detects whether a raw ICMP socket can actually be opened
+// (docs/ref/todo/multi-wan-failover-plan.md Task 13) — needed by
+// kernel.PathProbeManager.ProbeICMP, which requires cap_net_raw. This is a
+// read-only bind-only probe: it opens the socket and immediately closes it
+// again WITHOUT sending a single packet (Task 13: "probe ไม่ส่ง packet
+// จริง"). A failure here (typically EPERM/EACCES on a binary missing
+// cap_net_raw) is always reported as Degraded, never Available=false — the
+// Multi-WAN Failover feature keeps working via TCP-connect probing on such a
+// host (D-5), it is not a whole-feature outage.
+func probeICMPRaw() model.CapabilityProbeResult {
+	conn, err := icmp.ListenPacket("ip4:icmp", "0.0.0.0")
+	if err != nil {
+		return model.CapabilityProbeResult{
+			ID:        "icmp-probe",
+			Available: true,
+			Degraded:  true,
+			Reason:    model.CapabilityReasonICMPUnavailable,
+			Err:       err.Error(),
+		}
+	}
+	conn.Close()
+	return model.CapabilityProbeResult{ID: "icmp-probe", Available: true, Reason: model.CapabilityReasonOK}
 }
 
 // classifyNetlinkErr maps a netlink/nftables error's underlying errno to one

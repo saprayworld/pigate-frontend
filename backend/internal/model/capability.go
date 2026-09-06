@@ -55,6 +55,14 @@ const (
 	// via the existing conntrack poll, it just falls back to "estimated"
 	// accuracy instead of "near-exact".
 	CapabilityReasonEventsUnavailable = "events_unavailable"
+	// CapabilityReasonICMPUnavailable means a raw ICMP socket could not be
+	// opened — most commonly a missing cap_net_raw capability on the pigate
+	// binary (docs/ref/todo/multi-wan-failover-plan.md Task 13). Reported as
+	// Degraded, never Available=false: Multi-WAN Failover's "auto" probe
+	// method still falls back to TCP-connect (D-5), and any uplink
+	// configured with probeMethod="tcp" is entirely unaffected — this is not
+	// a whole-feature outage.
+	CapabilityReasonICMPUnavailable = "icmp_unavailable"
 )
 
 // CapabilityProbeResult is the raw result of probing one subsystem from the

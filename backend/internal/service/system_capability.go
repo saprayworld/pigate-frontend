@@ -28,6 +28,7 @@ var capabilityCatalog = []capabilityCatalogEntry{
 	{ID: "resolved", Name: "DNS Resolver (systemd-resolved)"},
 	{ID: "conntrack", Name: "Traffic Accounting (conntrack)"},
 	{ID: "conntrack-events", Name: "Conntrack Event Stream"},
+	{ID: "icmp-probe", Name: "Raw ICMP Probe (Multi-WAN Failover)"},
 }
 
 // ApplyHealthReporter lets any subsystem service (FirewallService today;
@@ -249,6 +250,10 @@ func detailFor(reason, errText string) string {
 		return "ไม่สามารถติดตาม conntrack DESTROY event ได้ (ต้องการ `cap_net_admin` และเคอร์เนลที่เปิด " +
 			"`net.netfilter.nf_conntrack_events=1`) — ระบบยัง poll ข้อมูล traffic ได้ตามปกติ " +
 			"เพียงแต่ป้าย \"ความแม่นยำ\" บนการ์ด Dashboard จะค้างที่ \"ประมาณการ\" แทน \"ใกล้เคียงจริง\""
+	case model.CapabilityReasonICMPUnavailable:
+		return "เปิด raw ICMP socket ไม่ได้ (ต้องการ `sudo setcap cap_net_raw+ep` ให้กับโปรแกรมนี้) — " +
+			"ฟีเจอร์ Multi-WAN Failover ยังใช้งานได้ปกติผ่านวิธี TCP-connect (probeMethod = tcp หรือ auto " +
+			"จะสลับไปใช้ TCP ให้อัตโนมัติ) เพียงแต่จะวัดค่า jitter ไม่ได้และแม่นยำน้อยกว่า ICMP"
 	default:
 		msg := "สถานะไม่ทราบแน่ชัด"
 		if errText != "" {
